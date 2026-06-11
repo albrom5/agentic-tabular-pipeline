@@ -1,0 +1,51 @@
+# Configuração de exemplo de um experimento.
+# O pipeline inteiro é controlável por este arquivo, garantindo reprodutibilidade
+# e generalização para novas bases (seção 16 do documento de apoio).
+
+experiment:
+  name: "baseline_credit_risk"
+  task_type: "classification"      # classification | regression | anomaly
+  target_column: "default"
+  primary_metric: "macro_f1"
+  random_seed: 42
+
+data:
+  source_type: "csv"               # csv | parquet | postgres
+  source_uri: "data/raw/credit.csv"
+  id_column: "customer_id"
+  time_column: null
+  group_column: null
+
+validation:
+  split_strategy: "stratified_kfold"   # holdout | kfold | stratified_kfold | group_kfold | time_split
+  n_splits: 5
+  test_size: 0.2
+
+preprocessing:
+  numeric_imputation: "median"
+  categorical_imputation: "most_frequent"
+  categorical_encoding: "one_hot"
+  scaling: "standard"
+  rare_category_threshold: 0.01
+
+models:
+  include:
+    - logistic_regression
+    - random_forest
+    - hist_gradient_boosting
+    - svm
+    - knn
+    - mlp
+    - autoencoder_latent_classifier
+  hyperparameter_budget_minutes: 20
+
+autoencoder:
+  enabled: true
+  latent_dim: 8
+  epochs: 30
+  batch_size: 64
+  use_case: "latent_features"      # latent_features | denoising | anomaly_detection
+
+storage:
+  postgres_uri_env: "DATABASE_URL"
+  artifact_dir: "artifacts/"

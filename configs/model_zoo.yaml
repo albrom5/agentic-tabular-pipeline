@@ -1,0 +1,139 @@
+# Catálogo extensível de modelos (model zoo).
+# O sistema escolhe automaticamente quais modelos são aplicáveis ao tipo de tarefa.
+# Adicionar um novo modelo aqui não deve exigir reescrever o pipeline principal.
+#
+# Campos por modelo:
+#   estimator        -> caminho de import "modulo:Classe"
+#   tasks            -> tarefas em que o modelo é aplicável
+#   default_params   -> hiperparâmetros base
+#   search_space     -> espaço de busca (Optuna) — opcional
+#   tier             -> minimum | bonus
+
+classification:
+  logistic_regression:
+    estimator: "sklearn.linear_model:LogisticRegression"
+    tasks: ["classification"]
+    tier: minimum
+    default_params: { max_iter: 1000 }
+
+  decision_tree:
+    estimator: "sklearn.tree:DecisionTreeClassifier"
+    tasks: ["classification"]
+    tier: minimum
+    default_params: {}
+
+  random_forest:
+    estimator: "sklearn.ensemble:RandomForestClassifier"
+    tasks: ["classification"]
+    tier: minimum
+    default_params: { n_estimators: 300, n_jobs: -1 }
+
+  hist_gradient_boosting:
+    estimator: "sklearn.ensemble:HistGradientBoostingClassifier"
+    tasks: ["classification"]
+    tier: minimum
+    default_params: {}
+
+  svm:
+    estimator: "sklearn.svm:SVC"
+    tasks: ["classification"]
+    tier: minimum
+    default_params: { probability: true }
+
+  knn:
+    estimator: "sklearn.neighbors:KNeighborsClassifier"
+    tasks: ["classification"]
+    tier: minimum
+    default_params: {}
+
+  naive_bayes:
+    estimator: "sklearn.naive_bayes:GaussianNB"
+    tasks: ["classification"]
+    tier: minimum
+    default_params: {}
+
+  mlp:
+    estimator: "sklearn.neural_network:MLPClassifier"
+    tasks: ["classification"]
+    tier: minimum
+    default_params: { max_iter: 500 }
+
+  xgboost:
+    estimator: "xgboost:XGBClassifier"
+    tasks: ["classification"]
+    tier: bonus
+    default_params: { n_estimators: 400, tree_method: "hist" }
+
+  lightgbm:
+    estimator: "lightgbm:LGBMClassifier"
+    tasks: ["classification"]
+    tier: bonus
+    default_params: {}
+
+regression:
+  linear_regression:
+    estimator: "sklearn.linear_model:LinearRegression"
+    tasks: ["regression"]
+    tier: minimum
+    default_params: {}
+
+  elastic_net:
+    estimator: "sklearn.linear_model:ElasticNet"
+    tasks: ["regression"]
+    tier: minimum
+    default_params: {}
+
+  decision_tree_regressor:
+    estimator: "sklearn.tree:DecisionTreeRegressor"
+    tasks: ["regression"]
+    tier: minimum
+    default_params: {}
+
+  random_forest_regressor:
+    estimator: "sklearn.ensemble:RandomForestRegressor"
+    tasks: ["regression"]
+    tier: minimum
+    default_params: { n_estimators: 300, n_jobs: -1 }
+
+  hist_gradient_boosting_regressor:
+    estimator: "sklearn.ensemble:HistGradientBoostingRegressor"
+    tasks: ["regression"]
+    tier: minimum
+    default_params: {}
+
+  svr:
+    estimator: "sklearn.svm:SVR"
+    tasks: ["regression"]
+    tier: minimum
+    default_params: {}
+
+  knn_regressor:
+    estimator: "sklearn.neighbors:KNeighborsRegressor"
+    tasks: ["regression"]
+    tier: minimum
+    default_params: {}
+
+  mlp_regressor:
+    estimator: "sklearn.neural_network:MLPRegressor"
+    tasks: ["regression"]
+    tier: minimum
+    default_params: { max_iter: 500 }
+
+anomaly:
+  isolation_forest:
+    estimator: "sklearn.ensemble:IsolationForest"
+    tasks: ["anomaly"]
+    tier: minimum
+    default_params: {}
+
+  local_outlier_factor:
+    estimator: "sklearn.neighbors:LocalOutlierFactor"
+    tasks: ["anomaly"]
+    tier: minimum
+    default_params: {}
+
+  one_class_svm:
+    estimator: "sklearn.svm:OneClassSVM"
+    tasks: ["anomaly"]
+    tier: minimum
+    default_params: {}
