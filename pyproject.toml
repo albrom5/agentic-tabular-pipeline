@@ -7,7 +7,7 @@ name = "agentic-tabular-pipeline"
 version = "0.1.0"
 description = "Sistema agentivo open source para pipeline de dados tabulares (MAQ020)"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11,<3.13"
 license = { text = "MIT" }
 
 dependencies = [
@@ -50,4 +50,4 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
