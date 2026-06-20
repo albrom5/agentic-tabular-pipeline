@@ -50,6 +50,7 @@ def run_experiment(
     *,
     event_sink: Any | None = None,
     recorder: Any | None = None,
+    experiment_id: Any | None = None,
 ) -> dict[str, Any]:
     """Executa o experimento de ponta a ponta a partir da configuração.
 
@@ -60,6 +61,9 @@ def run_experiment(
             não emitem eventos (modo em memória, útil em testes).
         recorder: :class:`~src.pipelines.persistence.RunRecorder` (ou compatível)
             para gravar experimento/run/dataset/model_results/report. Opcional.
+        experiment_id: identificador de um experimento já cadastrado (caso da API).
+            Quando informado, a persistência atualiza essa linha em vez de criar
+            uma nova. Ignorado quando ``recorder`` é ``None``.
 
     Returns:
         Dicionário com as saídas de cada etapa, o modelo recomendado, o ranking e
@@ -87,12 +91,12 @@ def run_experiment(
     # ------------------------------------------------------------------
     # Persistência: cria experimento e run (se houver recorder)
     # ------------------------------------------------------------------
-    experiment_id = None
     run_id = None
     if recorder is not None:
         experiment_id = recorder.create_experiment(
             name=name, task_type=task_type, target_column=target_column,
             primary_metric=primary_metric, config=config,
+            experiment_id=experiment_id,
         )
 
     def context(stage: str, **kwargs: Any) -> dict[str, Any]:

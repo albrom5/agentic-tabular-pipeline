@@ -62,7 +62,8 @@ cp .env.example .env          # ajuste as credenciais se necessário
 docker compose up --build
 ```
 
-Isso sobe o PostgreSQL, aplica as migrations e expõe a API (FastAPI) e a interface (Streamlit).
+Isso sobe o PostgreSQL, aplica as migrations e expõe a API (FastAPI, porta 8000) e a
+interface (Streamlit, porta 8501). A UI conversa com a API via `API_URL`.
 
 ### Ambiente Python local
 
@@ -72,13 +73,23 @@ pip install -e .[dev]
 # suba um PostgreSQL e exporte a variável de conexão:
 export DATABASE_URL=postgresql://postgres:postgres@localhost:5432/agentic
 psql "$DATABASE_URL" -f src/db/migrations/0001_initial_schema.sql
+# gere a base sintética de demonstração (ver data/README.md):
+python -m scripts.generate_demo_dataset
 ```
 
 ### Rodar um experimento
 
 ```bash
+# pela linha de comando (persiste no PostgreSQL se DATABASE_URL estiver definido):
 python -m src.pipelines.training --config configs/experiment_example.yaml
+
+# ou pela API + interface web:
+uvicorn src.api.main:app --reload          # backend em http://localhost:8000
+API_URL=http://localhost:8000 streamlit run src/ui/app.py   # UI em http://localhost:8501
 ```
+
+O notebook `notebooks/demo_end_to_end.ipynb` demonstra o fluxo completo e as
+consultas de auditoria da seção 23 (roda em memória sem `DATABASE_URL`).
 
 ## Stack open source
 

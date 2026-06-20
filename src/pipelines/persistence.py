@@ -42,10 +42,17 @@ class RunRecorder:
         target_column: str | None,
         primary_metric: str,
         config: dict[str, Any],
+        experiment_id: uuid.UUID | None = None,
     ) -> uuid.UUID:
-        experiment_id = uuid.uuid4()
+        """Cria (ou atualiza) o experimento e o marca como ``running``.
+
+        Quando ``experiment_id`` é informado — caso da API, que cadastra o
+        experimento antes de disparar a execução — a linha existente é
+        atualizada via ``merge`` em vez de criar uma duplicata.
+        """
+        experiment_id = experiment_id or uuid.uuid4()
         with self._sf() as session:
-            session.add(
+            session.merge(
                 Experiment(
                     id=experiment_id,
                     name=name,

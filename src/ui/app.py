@@ -1,40 +1,47 @@
 """Interface Streamlit do pipeline agentivo (seção 12 do documento de apoio).
 
-Cobre os oito requisitos de interface: cadastro de experimento, upload/seleção
-da base, escolha da variável-alvo e do tipo de tarefa, visualização do perfil e
-dos alertas de qualidade, revisão das ações propostas pelos agentes (aceitar ou
-ajustar), botão para executar o pipeline, painel de resultados com ranking,
-métricas, gráficos e recomendação, e acesso ao histórico de eventos agentivos.
+Cobre os requisitos de interface conversando com a **API real** (FastAPI):
+cadastro de experimento, upload/seleção da base, escolha da variável-alvo e do
+tipo de tarefa, visualização do perfil e dos alertas de qualidade persistidos,
+revisão das decisões dos agentes, disparo do pipeline, painel de resultados com
+ranking/métricas/recomendação e acesso ao histórico de eventos agentivos
+gravado no PostgreSQL (RNF03).
 
-Esta é uma versão de *protótipo de UI*: campos e botões operam sobre dados mock
-(``src/ui/mock_data.py``) para validar aparência e usabilidade. O único componente
-real exercitado é o Agente de Ingestão e Perfilamento, aplicado à base carregada.
+A comunicação é isolada em :class:`~src.ui.api_client.ApiClient` (``API_URL``).
+O upload é salvo em ``data/raw/uploads/`` — volume compartilhado com a API no
+``docker-compose`` —, de modo que o backend leia a base pelo caminho.
 
 Execução:
+    # requer a API no ar (uvicorn src.api.main:app) e DATABASE_URL configurado
     streamlit run src/ui/app.py
 """
 
 from __future__ import annotations
 
-import io
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import streamlit as st
+import yaml
 
 from src.agents.data_profile_agent import DataProfileAgent
-from src.ui import mock_data as mock
+from src.ui.api_client import ApiClient, ApiError
 
-st.set_page_config(
-    page_title="Agentic Tabular Pipeline",
-    page_icon="🧪",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+REPO_ROOT = Path(__file__).resolve().parents[2]
+RAW_DIR = REPO_ROOT / "data" / "raw"
+UPLOAD_DIR = RAW_DIR / "uploads"
+MODEL_ZOO_PATH = REPO_ROOT / "configs" / "model_zoo.yaml"
 
-# ---------------------------------------------------------------------------
-# Estilo
-# ---------------------------------------------------------------------------
+TASK_TYPES = ["classification", "regression", "anomaly"]
+SPLIT_STRATEGIES = [
+    "holdout", "kfold", "stratified_kfold", "group_kfold", "time_split",
+]
+METRICS_BY_TASK = {
+    "classification": ["macro_f1", "balanced_accuracy", "roc_auc", "f1", "accuracy"],
+    "regression": ["rmse", "mae", "r2", "mape"],
+    "anomaly": ["roc_auc", "average_precision", "precision_at_k"],
+}
 
 _CSS = """
 <style>
@@ -50,376 +57,530 @@ _CSS = """
     .badge-ok    { background:#0f5132; color:#d1e7dd; }
     .badge-run   { background:#664d03; color:#fff3cd; }
     .badge-draft { background:#41464b; color:#e2e3e5; }
-    .sev-alta   { color:#ff6b6b; font-weight:700; }
-    .sev-média  { color:#ffd166; font-weight:700; }
-    .sev-baixa  { color:#9aa0a6; font-weight:700; }
+    .badge-fail  { background:#5c1f25; color:#f5c2c7; }
     .pill {
         background:#1c2330; border:1px solid #2c3445; border-radius:10px;
         padding:10px 14px; margin-bottom:8px;
     }
 </style>
 """
-st.markdown(_CSS, unsafe_allow_html=True)
 
 _STATUS_BADGE = {
-    "concluído": "badge-ok",
-    "em execução": "badge-run",
-    "rascunho": "badge-draft",
+    "completed": "badge-ok",
+    "running": "badge-run",
+    "created": "badge-draft",
+    "failed": "badge-fail",
 }
 
 
 # ---------------------------------------------------------------------------
-# Estado de sessão
+# Infraestrutura
 # ---------------------------------------------------------------------------
+
+@st.cache_resource
+def _client() -> ApiClient:
+    return ApiClient()
+
 
 def _init_state() -> None:
     ss = st.session_state
-    ss.setdefault("dataframe", None)
-    ss.setdefault("dataset_name", None)
-    ss.setdefault("experiment_config", None)
-    ss.setdefault("pipeline_ran", False)
-    ss.setdefault("accepted_actions", {})
+    ss.setdefault("selected_experiment_id", None)
+    ss.setdefault("preview_df", None)
+    ss.setdefault("preview_source_uri", None)
+
+
+@st.cache_data(show_spinner=False)
+def _model_options(task_type: str) -> list[str]:
+    """Modelos aplicáveis à tarefa, lidos de configs/model_zoo.yaml."""
+    try:
+        zoo = yaml.safe_load(MODEL_ZOO_PATH.read_text(encoding="utf-8")) or {}
+    except OSError:
+        return []
+    section = zoo.get(task_type, {}) or {}
+    return sorted(section.keys())
+
+
+def _example_datasets() -> list[str]:
+    files = sorted(RAW_DIR.glob("*.csv")) + sorted(RAW_DIR.glob("*.parquet"))
+    return [str(p.relative_to(REPO_ROOT)) for p in files]
 
 
 # ---------------------------------------------------------------------------
 # Sidebar — seleção de experimento e ações globais
 # ---------------------------------------------------------------------------
 
-def _sidebar() -> dict[str, Any]:
+def _sidebar(api: ApiClient) -> dict[str, Any] | None:
     with st.sidebar:
         st.markdown("### 🧪 Agentic Tabular Pipeline")
-        st.caption("MAQ020 · protótipo de interface (dados mock)")
+        st.caption("MAQ020 · interface conectada à API")
+
+        online = api.health()
+        if online:
+            st.markdown(":green[● API online] "
+                        f"<small>`{api.base_url}`</small>", unsafe_allow_html=True)
+        else:
+            st.markdown(":red[● API offline] "
+                        f"<small>`{api.base_url}`</small>", unsafe_allow_html=True)
+            st.warning("Inicie a API: `uvicorn src.api.main:app` (e configure `DATABASE_URL`).")
+            return None
+
         st.divider()
+        try:
+            experiments = api.list_experiments()
+        except ApiError as exc:
+            st.error(str(exc))
+            return None
 
-        names = [e["name"] for e in mock.EXPERIMENTS]
-        selected = st.selectbox("Experimento", names, index=0)
-        experiment = next(e for e in mock.EXPERIMENTS if e["name"] == selected)
+        if st.button("➕ Novo experimento", width="stretch"):
+            st.session_state.selected_experiment_id = None
 
-        badge_cls = _STATUS_BADGE.get(experiment["status"], "badge-draft")
+        if not experiments:
+            st.info("Nenhum experimento ainda. Cadastre um na aba **Experimento**.")
+            return None
+
+        labels = {e["id"]: f"{e['name']} · {e['status']}" for e in experiments}
+        ids = list(labels.keys())
+        current = st.session_state.selected_experiment_id
+        index = ids.index(current) if current in ids else 0
+        chosen = st.selectbox(
+            "Experimento", ids, index=index, format_func=lambda i: labels[i]
+        )
+        st.session_state.selected_experiment_id = chosen
+        experiment = next(e for e in experiments if e["id"] == chosen)
+
+        badge = _STATUS_BADGE.get(experiment["status"], "badge-draft")
         st.markdown(
-            f"**Status:** <span class='badge {badge_cls}'>{experiment['status']}</span>",
+            f"**Status:** <span class='badge {badge}'>{experiment['status']}</span>",
             unsafe_allow_html=True,
         )
-        st.caption(f"ID `{experiment['id'][:8]}…` · criado em {experiment['created_at']}")
+        st.caption(f"ID `{experiment['id'][:8]}…` · {experiment.get('created_at', '')}")
 
         st.divider()
-        st.button("➕ Novo experimento", width="stretch")
-        st.button("🔁 Reexecutar com mesma seed", width="stretch",
-                  help="RF15 — reexecução reprodutível (mock).")
-        st.button("⬇️ Exportar relatório técnico", width="stretch",
-                  help="RF14 — relatório em Markdown/PDF (mock).")
+        c1, c2 = st.columns(2)
+        if c1.button("🔁 Reexecutar", width="stretch",
+                     help="RF15 — reexecução reprodutível com a mesma seed."):
+            try:
+                api.run_experiment(experiment["id"])
+                st.toast("Execução disparada.", icon="▶️")
+            except ApiError as exc:
+                st.error(str(exc))
+        if c2.button("↻ Atualizar", width="stretch"):
+            st.rerun()
 
-        st.divider()
-        st.caption("Pipeline: 1 Problema · 2 Perfil · 3 Limpeza · 4 Features · "
-                   "5 Split · 6 Model Zoo · 7 Autoencoder · 8 Avaliação · 9 Relatório")
-    return experiment
+        report = api.get_report(experiment["id"])
+        if report and report.get("content"):
+            st.download_button(
+                "⬇️ Exportar relatório (.md)", data=report["content"],
+                file_name=f"{experiment['name']}_report.md", mime="text/markdown",
+                width="stretch",
+            )
+        return experiment
 
 
 # ---------------------------------------------------------------------------
-# Aba 1 — Cadastro do experimento (itens 12.1, 12.2, 12.3)
+# Aba 1 — Cadastro do experimento (RF01/RF02)
 # ---------------------------------------------------------------------------
 
-def _tab_experiment(experiment: dict[str, Any]) -> None:
+def _tab_experiment(api: ApiClient) -> None:
     st.subheader("Cadastrar experimento")
-    st.caption("Defina a tarefa, selecione a base e a variável-alvo (RF01/RF02).")
+    st.caption("Defina a tarefa, selecione a base e a variável-alvo (RF01/RF02). "
+               "Ao salvar, o experimento é criado e o pipeline disparado na API.")
 
     col_form, col_data = st.columns([3, 2], gap="large")
 
+    # ---- base de dados ----
     with col_data:
         st.markdown("##### Base de dados")
         source = st.radio(
-            "Origem da base", ["Upload", "Base de exemplo", "PostgreSQL"],
+            "Origem da base", ["Base de exemplo", "Upload", "PostgreSQL"],
             horizontal=True, label_visibility="collapsed",
         )
-        uploaded = None
-        if source == "Upload":
+        source_uri: str | None = None
+        if source == "Base de exemplo":
+            options = _example_datasets()
+            if options:
+                source_uri = st.selectbox("Dataset disponível (data/raw)", options)
+            else:
+                st.warning("Nenhum arquivo em data/raw. Gere a base: "
+                           "`python -m scripts.generate_demo_dataset`.")
+        elif source == "Upload":
             uploaded = st.file_uploader("Arraste um CSV ou Parquet", type=["csv", "parquet"])
-        elif source == "Base de exemplo":
-            st.selectbox("Dataset disponível", mock.SAMPLE_DATASETS, index=0)
+            if uploaded is not None:
+                source_uri = _persist_upload(uploaded)
         else:
             st.text_input("URI PostgreSQL", placeholder="postgresql://…/schema.tabela",
                           disabled=True)
             st.caption("Conector PostgreSQL é bônus no MVP (RF02).")
 
-        df = _resolve_dataframe(uploaded)
-        st.session_state.dataframe = df
-        cols = list(df.columns)
-        st.success(f"Base carregada: {df.shape[0]} linhas × {df.shape[1]} colunas.")
-        with st.expander("Pré-visualizar amostra"):
-            st.dataframe(df.head(15), width="stretch")
+        df = _load_preview(source_uri)
+        if df is not None:
+            st.session_state.preview_df = df
+            st.session_state.preview_source_uri = source_uri
+            st.success(f"Base carregada: {df.shape[0]} linhas × {df.shape[1]} colunas.")
+            with st.expander("Pré-visualizar amostra"):
+                st.dataframe(df.head(15), width="stretch")
 
+    # ---- configuração ----
+    df = st.session_state.preview_df
+    cols = list(df.columns) if df is not None else []
     with col_form:
         st.markdown("##### Configuração do estudo")
         with st.form("experiment_form"):
-            name = st.text_input("Nome do experimento", value=experiment["name"])
+            name = st.text_input("Nome do experimento", value="experimento_credit")
             c1, c2 = st.columns(2)
-            task_type = c1.selectbox(
-                "Tipo de tarefa", mock.TASK_TYPES,
-                index=mock.TASK_TYPES.index(experiment["task_type"]),
-            )
-            target_default = experiment["target_column"] or (cols[-1] if cols else "")
-            target_index = cols.index(target_default) if target_default in cols else len(cols) - 1
+            task_type = c1.selectbox("Tipo de tarefa", TASK_TYPES)
             target = c2.selectbox(
-                "Variável-alvo", cols,
-                index=max(target_index, 0),
-                disabled=(task_type == "anomaly"),
+                "Variável-alvo", cols or ["—"],
+                index=(len(cols) - 1) if cols else 0,
+                disabled=(task_type == "anomaly" or not cols),
                 help="Opcional para detecção de anomalias não supervisionada.",
             )
 
-            metrics = mock.METRICS_BY_TASK[task_type]
             c3, c4 = st.columns(2)
-            primary_metric = c3.selectbox("Métrica primária", metrics)
+            primary_metric = c3.selectbox("Métrica primária", METRICS_BY_TASK[task_type])
             success = c4.number_input("Critério de sucesso (≥)", 0.0, 1.0, 0.70, 0.01)
+            seed = c3.number_input("Seed", 0, 10_000, 42)
+            budget = c4.number_input("Budget de treino (min)", 1, 240, 20)
 
             c5, c6 = st.columns(2)
-            split = c5.selectbox("Estratégia de split", mock.SPLIT_STRATEGIES, index=2)
-            budget = c6.number_input("Budget de treino (min)", 1, 240, 20)
+            split = c5.selectbox("Estratégia de split", SPLIT_STRATEGIES, index=2)
+            n_splits = c6.number_input("Nº de folds", 2, 10, 5)
 
-            constraints = st.text_area(
-                "Restrições adicionais (JSON livre)",
-                value='{"interpretabilidade": "alta", "max_fit_seconds": 60}',
-                height=70,
+            models = st.multiselect(
+                "Modelos a treinar (model zoo)", _model_options(task_type),
+                default=_model_options(task_type)[:5],
             )
-            submitted = st.form_submit_button("💾 Salvar configuração", type="primary",
-                                              width="stretch")
+            id_col = st.selectbox("Coluna de id (opcional)", ["—"] + cols)
+            ae_enabled = st.checkbox("Treinar autoencoder tabular (RF10)", value=True)
+
+            submitted = st.form_submit_button(
+                "🚀 Criar e executar pipeline", type="primary", width="stretch"
+            )
 
         if submitted:
-            st.session_state.experiment_config = {
-                "name": name, "task_type": task_type, "target_column": target,
-                "primary_metric": primary_metric, "success_threshold": success,
-                "split_strategy": split, "budget_minutes": budget,
-                "constraints": constraints,
-            }
-            st.session_state.dataset_name = name
-            st.toast("Configuração salva.", icon="✅")
-
-        st.divider()
-        st.markdown("##### Executar pipeline")
-        st.caption("Dispara os 9 agentes em sequência (mock).")
-        if st.button("▶️ Executar pipeline", type="primary", width="stretch"):
-            _run_pipeline_mock()
+            _submit_experiment(
+                api, name=name, task_type=task_type, target=target if cols else None,
+                primary_metric=primary_metric, success=success, seed=int(seed),
+                budget=int(budget), split=split, n_splits=int(n_splits),
+                models=models, id_col=None if id_col == "—" else id_col,
+                ae_enabled=ae_enabled,
+            )
 
 
-def _resolve_dataframe(uploaded: Any) -> pd.DataFrame:
-    if uploaded is not None:
-        try:
-            if uploaded.name.endswith(".parquet"):
-                return pd.read_parquet(uploaded)
-            return pd.read_csv(uploaded)
-        except Exception as exc:  # pragma: no cover - feedback de UI
-            st.error(f"Falha ao ler o arquivo: {exc}")
-    if st.session_state.dataframe is not None:
-        return st.session_state.dataframe
-    return mock.sample_dataframe()
-
-
-def _run_pipeline_mock() -> None:
-    steps = [
-        "Formulação do problema", "Ingestão e perfilamento", "Qualidade e limpeza",
-        "Engenharia de atributos", "Split e validação", "Treino do model zoo",
-        "Autoencoder tabular", "Avaliação e seleção", "Relatório e auditoria",
-    ]
-    bar = st.progress(0.0, text="Iniciando pipeline…")
-    for i, step in enumerate(steps, start=1):
-        bar.progress(i / len(steps), text=f"Agente {i}/9 — {step}")
-    bar.empty()
-    st.session_state.pipeline_ran = True
-    st.success("Pipeline executado. Veja os resultados na aba **Resultados**.")
+def _submit_experiment(api: ApiClient, **f: Any) -> None:
+    source_uri = st.session_state.preview_source_uri
+    if not source_uri:
+        st.error("Selecione ou faça upload de uma base antes de executar.")
+        return
+    config = _build_config(source_uri=source_uri, **f)
+    try:
+        created = api.create_experiment(
+            name=f["name"], task_type=f["task_type"], target_column=f["target"],
+            primary_metric=f["primary_metric"], config=config,
+        )
+        eid = created["experiment_id"]
+        api.run_experiment(eid)
+    except ApiError as exc:
+        st.error(str(exc))
+        return
+    st.session_state.selected_experiment_id = eid
+    st.success(f"Experimento criado (`{eid[:8]}…`) e pipeline em execução. "
+               "Acompanhe o status na barra lateral e veja **Resultados** ao concluir.")
     st.balloons()
 
 
+def _build_config(*, source_uri: str, name: str, task_type: str, target: str | None,
+                  primary_metric: str, success: float, seed: int, budget: int,
+                  split: str, n_splits: int, models: list[str], id_col: str | None,
+                  ae_enabled: bool) -> dict[str, Any]:
+    source_type = "parquet" if source_uri.endswith(".parquet") else "csv"
+    return {
+        "experiment": {
+            "name": name, "task_type": task_type, "target_column": target,
+            "primary_metric": primary_metric, "random_seed": seed,
+            "success_threshold": success,
+        },
+        "data": {
+            "source_type": source_type, "source_uri": source_uri,
+            "id_column": id_col, "time_column": None, "group_column": None,
+        },
+        "validation": {"split_strategy": split, "n_splits": n_splits, "test_size": 0.2},
+        "preprocessing": {
+            "numeric_imputation": "median", "categorical_imputation": "most_frequent",
+            "categorical_encoding": "one_hot", "scaling": "standard",
+            "rare_category_threshold": 0.01,
+        },
+        "models": {"include": models, "time_budget_seconds": budget * 60},
+        "autoencoder": {
+            "enabled": ae_enabled, "latent_dim": 8, "epochs": 30,
+            "batch_size": 64, "use_case": "latent_features",
+        },
+        "storage": {"postgres_uri_env": "DATABASE_URL", "artifact_dir": "artifacts/"},
+    }
+
+
+def _persist_upload(uploaded: Any) -> str | None:
+    """Salva o upload no volume compartilhado e devolve o caminho relativo."""
+    try:
+        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        dest = UPLOAD_DIR / uploaded.name
+        dest.write_bytes(uploaded.getbuffer())
+        return str(dest.relative_to(REPO_ROOT))
+    except OSError as exc:  # pragma: no cover - feedback de UI
+        st.error(f"Falha ao salvar o upload: {exc}")
+        return None
+
+
+def _load_preview(source_uri: str | None) -> pd.DataFrame | None:
+    if not source_uri:
+        return None
+    path = REPO_ROOT / source_uri
+    try:
+        if source_uri.endswith(".parquet"):
+            return pd.read_parquet(path)
+        return pd.read_csv(path)
+    except Exception as exc:  # pragma: no cover - feedback de UI
+        st.error(f"Falha ao ler a base: {exc}")
+        return None
+
+
 # ---------------------------------------------------------------------------
-# Aba 2 — Perfil e qualidade (item 12.4)
+# Aba 2 — Perfil e qualidade (RF03/RF04)
 # ---------------------------------------------------------------------------
 
-def _tab_profile() -> None:
+def _tab_profile(api: ApiClient, experiment: dict[str, Any] | None) -> None:
     st.subheader("Perfil dos dados e alertas de qualidade")
-    st.caption("Perfil gerado pelo Agente de Ingestão e Perfilamento (RF03) "
-               "e alertas de qualidade (RF04/RF06).")
+    st.caption("Perfil (RF03) e relatório de qualidade (RF04/RF06) persistidos pela API. "
+               "Antes da execução, mostra uma pré-visualização local da base.")
 
-    df = st.session_state.dataframe
-    if df is None:
-        df = mock.sample_dataframe()
+    profile = None
+    quality = None
+    if experiment is not None:
+        dataset = api.get_profile(experiment["id"])
+        if dataset:
+            profile = dataset.get("profile_json")
+            quality = dataset.get("quality_report_json")
 
-    config = st.session_state.experiment_config or {}
-    profile = _run_profile_agent(df, config)
+    if profile is None:
+        df = st.session_state.preview_df
+        if df is None:
+            st.info("Selecione uma base na aba **Experimento** ou execute o pipeline.")
+            return
+        st.caption("⚠️ Pré-visualização local (Agente de Perfilamento) — ainda não persistida.")
+        profile = _local_profile(df)
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Linhas", f"{profile['n_rows']:,}".replace(",", "."))
-    m2.metric("Colunas", profile["n_cols"])
-    m3.metric("Duplicatas", profile["duplicates"]["n_duplicate_rows"])
-    total_missing = sum(c["n_missing"] for c in profile["columns"])
-    m4.metric("Células faltantes", f"{total_missing:,}".replace(",", "."))
-    st.caption(f"Hash de conteúdo: `{profile['content_hash'][:24]}…` — versionamento de dados (RNF01).")
-
-    st.markdown("##### Perfil por coluna")
-    st.dataframe(_columns_table(profile), width="stretch", hide_index=True)
-
-    col_left, col_right = st.columns(2, gap="large")
-    with col_left:
-        st.markdown("##### Distribuição do alvo")
-        target = profile.get("target")
-        if target and target.get("kind") == "classification":
-            dist = pd.DataFrame(target["class_distribution"]).set_index("label")["count"]
-            st.bar_chart(dist)
-            st.caption(f"Razão de desbalanceamento: **{target.get('imbalance_ratio')}** "
-                       f"(maioria/minoria).")
-        elif target and target.get("kind") == "regression":
-            st.bar_chart(df[target["name"]].dropna())
-        else:
-            st.info("Sem variável-alvo definida (modo não supervisionado).")
-
-    with col_right:
-        st.markdown("##### Correlações fortes (|r| ≥ 0.95)")
-        if profile["high_correlations"]:
-            st.dataframe(pd.DataFrame(profile["high_correlations"]),
-                         width="stretch", hide_index=True)
-        else:
-            st.success("Nenhum par de atributos fortemente correlacionado.")
-
-    st.divider()
-    st.markdown("##### Alertas de qualidade")
-    report = mock.quality_report()
-    s = report["summary"]
-    a1, a2, a3 = st.columns(3)
-    a1.metric("Severidade alta", s["alta"])
-    a2.metric("Severidade média", s["média"])
-    a3.metric("Severidade baixa", s["baixa"])
-    for alert in report["alerts"]:
-        sev = alert["severity"]
-        st.markdown(
-            f"<div class='pill'><span class='sev-{sev}'>● {sev.upper()}</span> "
-            f"&nbsp;<b>{alert['rule']}</b> · <code>{alert['column']}</code><br>"
-            f"{alert['message']}<br>"
-            f"<small>💡 {alert['suggestion']}</small></div>",
-            unsafe_allow_html=True,
-        )
+    _render_profile(profile)
+    if quality:
+        _render_quality(quality)
 
 
 @st.cache_data(show_spinner=False)
-def _run_profile_agent(df: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]:
+def _local_profile(df: pd.DataFrame) -> dict[str, Any]:
     ctx: dict[str, Any] = {"dataframe": df}
-    if config.get("target_column") in df.columns:
-        ctx["target_column"] = config["target_column"]
-        ctx["task_type"] = config.get("task_type")
-    elif "default" in df.columns:
+    if "default" in df.columns:
         ctx["target_column"] = "default"
         ctx["task_type"] = "classification"
     return DataProfileAgent(event_sink=None).run(ctx).output
 
 
-def _columns_table(profile: dict[str, Any]) -> pd.DataFrame:
-    rows = []
-    for c in profile["columns"]:
-        rows.append(
+def _render_profile(profile: dict[str, Any]) -> None:
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Linhas", f"{profile.get('n_rows', 0):,}".replace(",", "."))
+    m2.metric("Colunas", profile.get("n_cols", len(profile.get("columns", []))))
+    dups = (profile.get("duplicates") or {}).get("n_duplicate_rows", "—")
+    m3.metric("Duplicatas", dups)
+    total_missing = sum(c.get("n_missing", 0) for c in profile.get("columns", []))
+    m4.metric("Células faltantes", f"{total_missing:,}".replace(",", "."))
+    if profile.get("content_hash"):
+        st.caption(f"Hash de conteúdo: `{profile['content_hash'][:24]}…` (RNF01).")
+
+    if profile.get("columns"):
+        st.markdown("##### Perfil por coluna")
+        rows = [
             {
-                "coluna": c["name"],
-                "tipo inferido": c["inferred_type"],
-                "faltantes %": c["pct_missing"],
-                "únicos": c["n_unique"],
-                "papel": c.get("role") or ("alvo" if c["is_target"] else ""),
+                "coluna": c.get("name"),
+                "tipo inferido": c.get("inferred_type"),
+                "faltantes %": c.get("pct_missing"),
+                "únicos": c.get("n_unique"),
+                "papel": c.get("role") or ("alvo" if c.get("is_target") else ""),
             }
+            for c in profile["columns"]
+        ]
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+    target = profile.get("target")
+    if target and target.get("kind") == "classification":
+        st.markdown("##### Distribuição do alvo")
+        dist = pd.DataFrame(target["class_distribution"]).set_index("label")["count"]
+        st.bar_chart(dist)
+        st.caption(f"Razão de desbalanceamento: **{target.get('imbalance_ratio')}**.")
+
+
+def _render_quality(q: dict[str, Any]) -> None:
+    st.divider()
+    st.markdown("##### Alertas de qualidade (persistidos)")
+    a1, a2, a3, a4 = st.columns(4)
+    a1.metric("Duplicatas", q.get("n_duplicate_rows", 0))
+    a2.metric("Colunas com faltantes", len(q.get("missing", {})))
+    a3.metric("Colunas constantes", len(q.get("constant_columns", [])))
+    a4.metric("Faltantes no alvo", q.get("target_missing", 0))
+
+    if q.get("missing"):
+        st.markdown("**Valores faltantes**")
+        st.dataframe(
+            pd.DataFrame(
+                [{"coluna": k, "n": v["n"], "%": v["pct"]} for k, v in q["missing"].items()]
+            ),
+            width="stretch", hide_index=True,
         )
+    if q.get("rare_categories"):
+        st.markdown("**Categorias raras**")
+        for col, info in q["rare_categories"].items():
+            st.markdown(f"<div class='pill'><code>{col}</code> — {info['n_rare']} categoria(s) "
+                        f"rara(s): {', '.join(info['categories'])}</div>",
+                        unsafe_allow_html=True)
+    if q.get("outliers"):
+        st.markdown("**Outliers (IQR)**")
+        st.dataframe(
+            pd.DataFrame(
+                [{"coluna": k, "n": v["n"], "%": v["pct"]} for k, v in q["outliers"].items()]
+            ),
+            width="stretch", hide_index=True,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Aba 3 — Decisões dos agentes (RNF03)
+# ---------------------------------------------------------------------------
+
+def _tab_actions(api: ApiClient, experiment: dict[str, Any] | None) -> None:
+    st.subheader("Decisões dos agentes")
+    st.caption("Ações de limpeza e engenharia de atributos efetivamente aplicadas, "
+               "extraídas dos eventos agentivos persistidos (auditável — RNF03).")
+
+    if experiment is None:
+        st.info("Selecione um experimento.")
+        return
+    events = _safe_events(api, experiment["id"])
+    relevant = [e for e in events
+                if e["event_type"] in {"cleaning_decision", "feature_engineering"}]
+    if not relevant:
+        st.info("Execute o pipeline para registrar as decisões dos agentes.")
+        return
+
+    for ev in relevant:
+        st.markdown(f"**{ev['agent_name']}** · `{ev['event_type']}`")
+        out = ev.get("output_json") or {}
+        actions = out.get("actions") or out.get("transformations") or []
+        if actions:
+            st.dataframe(pd.DataFrame(actions), width="stretch", hide_index=True)
+        if out.get("warnings"):
+            for w in out["warnings"]:
+                st.markdown(f"<div class='pill'>⚠️ {w}</div>", unsafe_allow_html=True)
+        if ev.get("rationale"):
+            st.caption(f"💡 {ev['rationale']}")
+        st.divider()
+
+
+# ---------------------------------------------------------------------------
+# Aba 4 — Resultados (RF11/RF12)
+# ---------------------------------------------------------------------------
+
+def _tab_results(api: ApiClient, experiment: dict[str, Any] | None) -> None:
+    st.subheader("Ranking de modelos e recomendação")
+    if experiment is None:
+        st.info("Selecione um experimento.")
+        return
+    if experiment["status"] != "completed":
+        st.info(f"Status atual: **{experiment['status']}**. "
+                "Os resultados aparecem quando a execução conclui (use ↻ Atualizar).")
+        if experiment["status"] != "running":
+            return
+
+    report = api.get_report(experiment["id"])
+    summary = (report or {}).get("summary_json") or {}
+    runs = _safe_runs(api, experiment["id"])
+    run = runs[-1] if runs else None
+    metrics = (run or {}).get("metrics_json") or {}
+    ranking = summary.get("ranking") or (api.ranking(run["id"]) if run else [])
+
+    if not ranking:
+        st.info("Ranking ainda não disponível.")
+        return
+
+    best = metrics.get("best_model") or summary.get("best_model")
+    best_entry = next((e for e in ranking if e["model_name"] == best), ranking[0])
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Melhor modelo", best)
+    mean = best_entry.get("primary_mean", best_entry.get("mean"))
+    std = best_entry.get("primary_std", best_entry.get("std", 0.0)) or 0.0
+    m2.metric(f"{metrics.get('primary_metric', 'métrica')} (médio)",
+              f"{mean:.3f}", f"±{std:.3f}")
+    meets = metrics.get("meets_success_threshold")
+    m3.metric("Critério de sucesso",
+              "—" if meets is None else ("atingido" if meets else "não atingido"))
+    m4.metric("Modelos avaliados", len(ranking))
+
+    if summary.get("selection_reason"):
+        st.markdown("##### Recomendação final")
+        st.success(summary["selection_reason"])
+
+    st.markdown("##### Ranking de modelos (RF11)")
+    st.dataframe(_ranking_table(ranking), width="stretch", hide_index=True)
+
+    expl = summary.get("explainability")
+    if expl and expl.get("top_features"):
+        st.markdown(f"##### Importância de atributos — {expl.get('method')} (RF12)")
+        imp = pd.DataFrame(expl["top_features"]).set_index("feature")["importance"]
+        st.bar_chart(imp)
+
+    c1, c2 = st.columns(2, gap="large")
+    with c1:
+        if summary.get("risks"):
+            st.markdown("##### Riscos")
+            for r in summary["risks"]:
+                st.markdown(f"<div class='pill'>⚠️ {r}</div>", unsafe_allow_html=True)
+    with c2:
+        if summary.get("limitations"):
+            st.markdown("##### Limitações")
+            for limit in summary["limitations"]:
+                st.markdown(f"<div class='pill'>{limit}</div>", unsafe_allow_html=True)
+
+    if report and report.get("content"):
+        with st.expander("📄 Relatório técnico completo (RF14)"):
+            st.markdown(report["content"])
+
+
+def _ranking_table(ranking: list[dict[str, Any]]) -> pd.DataFrame:
+    rows = []
+    for e in ranking:
+        rows.append({
+            "modelo": e["model_name"],
+            "média": round(e.get("primary_mean", e.get("mean", 0.0)), 4),
+            "desvio": round(e.get("primary_std", e.get("std", 0.0)) or 0.0, 4),
+            "folds": e.get("n_folds", e.get("folds")),
+            "tempo fit (s)": round(e.get("mean_fit_seconds") or 0.0, 3),
+        })
     return pd.DataFrame(rows)
 
 
 # ---------------------------------------------------------------------------
-# Aba 3 — Ações propostas pelos agentes (item 12.5)
+# Aba 5 — Histórico agentivo (RNF03, seção 23)
 # ---------------------------------------------------------------------------
 
-def _tab_actions() -> None:
-    st.subheader("Ações propostas pelos agentes")
-    st.caption("Revise, aceite ou ajuste cada decisão antes de aplicar (RNF03 — auditável).")
+def _tab_history(api: ApiClient, experiment: dict[str, Any] | None) -> None:
+    st.subheader("Histórico de eventos agentivos")
+    if experiment is None:
+        st.info("Selecione um experimento.")
+        return
+    st.caption(f"Trilha de auditoria de **{experiment['name']}** "
+               "(tabela `agent_events`, RNF03).")
 
-    actions = mock.proposed_actions()
-    accepted = st.session_state.accepted_actions
-
-    with st.form("actions_form"):
-        for i, act in enumerate(actions):
-            c_check, c_body = st.columns([1, 11])
-            key = f"action_{i}"
-            checked = c_check.checkbox(
-                "aceitar", value=act["default_accepted"], key=key,
-                label_visibility="collapsed",
-            )
-            accepted[key] = checked
-            flag = "⚠️ requer atenção" if not act["default_accepted"] else ""
-            c_body.markdown(
-                f"**{act['action']}** &nbsp; <small>· {act['agent']} {flag}</small><br>"
-                f"<small>{act['reason']}</small>",
-                unsafe_allow_html=True,
-            )
-        applied = st.form_submit_button("✅ Aplicar ações selecionadas", type="primary")
-
-    if applied:
-        n = sum(1 for v in accepted.values() if v)
-        st.success(f"{n} de {len(actions)} ações aplicadas e registradas como eventos agentivos.")
-
-
-# ---------------------------------------------------------------------------
-# Aba 4 — Resultados (item 12.7)
-# ---------------------------------------------------------------------------
-
-def _tab_results(experiment: dict[str, Any]) -> None:
-    st.subheader("Ranking de modelos e recomendação")
-
-    if not (st.session_state.pipeline_ran or experiment["status"] == "concluído"):
-        st.info("Execute o pipeline na aba **Experimento** para gerar os resultados.")
+    events = _safe_events(api, experiment["id"])
+    if not events:
+        st.info("Sem eventos ainda. Execute o pipeline.")
         return
 
-    rec = mock.recommendation()
-    ranking = mock.model_ranking()
-
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Melhor modelo", rec["model"])
-    m2.metric(f"{rec['primary_metric']} (médio)", f"{rec['score']:.3f}", f"±{rec['std']:.3f}")
-    m3.metric("Critério de sucesso", f"≥ {rec['threshold']:.2f}",
-              "atingido" if rec["passes"] else "não atingido")
-    m4.metric("Modelos avaliados", len(ranking))
-
-    st.markdown("##### Recomendação final")
-    st.success(rec["text"])
-
-    st.markdown("##### Ranking de modelos (RF11)")
-    st.caption("Métrica primária por fold: média, desvio e tempo de treino.")
-    st.dataframe(
-        ranking,
-        width="stretch", hide_index=True,
-        column_config={
-            "macro_f1": st.column_config.ProgressColumn(
-                "macro_f1", min_value=0.0, max_value=1.0, format="%.3f"),
-            "roc_auc": st.column_config.NumberColumn("roc_auc", format="%.3f"),
-            "tempo_fit_s": st.column_config.NumberColumn("tempo fit (s)", format="%.1f s"),
-        },
-    )
-
-    g1, g2 = st.columns(2, gap="large")
-    with g1:
-        st.markdown("##### Métrica por fold (top 3)")
-        st.line_chart(mock.fold_scores())
-    with g2:
-        st.markdown("##### Curva ROC (modelo recomendado)")
-        st.line_chart(mock.roc_curve().set_index("taxa de falsos positivos"))
-
-    g3, g4 = st.columns(2, gap="large")
-    with g3:
-        st.markdown("##### Matriz de confusão")
-        st.dataframe(_styled_confusion(mock.confusion_matrix()), width="stretch")
-    with g4:
-        st.markdown("##### Importância de atributos (RF12)")
-        st.bar_chart(mock.feature_importance())
-
-
-# ---------------------------------------------------------------------------
-# Aba 5 — Histórico agentivo (item 12.8)
-# ---------------------------------------------------------------------------
-
-def _tab_history(experiment: dict[str, Any]) -> None:
-    st.subheader("Histórico de eventos agentivos")
-    st.caption(f"Trilha de auditoria do experimento **{experiment['name']}** "
-               f"(`agent_events`, RNF03).")
-
-    events = mock.agent_events()
     agents = ["todos"] + sorted({e["agent_name"] for e in events})
     c1, c2 = st.columns([2, 3])
     chosen = c1.selectbox("Filtrar por agente", agents)
@@ -428,60 +589,48 @@ def _tab_history(experiment: dict[str, Any]) -> None:
     filtered = [
         e for e in events
         if (chosen == "todos" or e["agent_name"] == chosen)
-        and (not search or search.lower() in e["rationale"].lower())
+        and (not search or search.lower() in (e.get("rationale") or "").lower())
     ]
-
+    table = pd.DataFrame([
+        {
+            "data/hora": e.get("created_at"),
+            "agente": e["agent_name"],
+            "tipo de evento": e["event_type"],
+            "justificativa": e.get("rationale"),
+        }
+        for e in filtered
+    ])
     st.dataframe(
-        pd.DataFrame(filtered),
-        width="stretch", hide_index=True,
-        column_config={
-            "timestamp": "data/hora",
-            "agent_name": "agente",
-            "event_type": "tipo de evento",
-            "rationale": st.column_config.TextColumn("justificativa", width="large"),
-        },
+        table, width="stretch", hide_index=True,
+        column_config={"justificativa": st.column_config.TextColumn(
+            "justificativa", width="large")},
     )
-
     st.caption(f"{len(filtered)} de {len(events)} eventos.")
-    with st.expander("Exemplo de evento persistido (JSONB)"):
-        st.json(
-            {
-                "experiment_id": experiment["id"],
-                "agent_name": "Agente de Qualidade e Limpeza",
-                "event_type": "cleaning_decision",
-                "input_json": {"missing_values": {"income": 0.23}, "duplicates": 12},
-                "output_json": {
-                    "actions": [
-                        {"column": "income", "operation": "median_imputation",
-                         "reason": "23% de faltantes; variável numérica relevante"},
-                        {"operation": "drop_duplicates", "rows": 12, "reason": "duplicatas exatas"},
-                    ],
-                    "warnings": ["avaliar viés na variável income"],
-                },
-                "rationale": "Imputação pela mediana como baseline robusto.",
-            }
-        )
-    st.download_button(
-        "⬇️ Baixar eventos (JSON)", data=_events_json(filtered),
-        file_name="agent_events.json", mime="application/json",
-    )
+
+    if filtered:
+        with st.expander("Inspecionar evento (JSONB)"):
+            idx = st.number_input("Evento nº", 0, len(filtered) - 1, 0)
+            st.json(filtered[int(idx)])
 
 
-def _styled_confusion(cm: pd.DataFrame):
-    """Gradiente azul manual (sem dependência de matplotlib)."""
-    vmax = float(cm.to_numpy().max()) or 1.0
+# ---------------------------------------------------------------------------
+# Helpers de chamadas tolerantes a falha
+# ---------------------------------------------------------------------------
 
-    def _shade(val: Any) -> str:
-        alpha = 0.12 + 0.78 * (float(val) / vmax)
-        return f"background-color: rgba(46, 134, 222, {alpha:.2f}); color: #f0f4ff;"
+def _safe_events(api: ApiClient, experiment_id: str) -> list[dict[str, Any]]:
+    try:
+        return api.list_events(experiment_id)
+    except ApiError as exc:
+        st.error(str(exc))
+        return []
 
-    return cm.style.map(_shade).format("{:d}")
 
-
-def _events_json(events: list[dict[str, Any]]) -> bytes:
-    buf = io.StringIO()
-    pd.DataFrame(events).to_json(buf, orient="records", force_ascii=False, indent=2)
-    return buf.getvalue().encode("utf-8")
+def _safe_runs(api: ApiClient, experiment_id: str) -> list[dict[str, Any]]:
+    try:
+        return api.list_runs(experiment_id)
+    except ApiError as exc:
+        st.error(str(exc))
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -489,26 +638,33 @@ def _events_json(events: list[dict[str, Any]]) -> bytes:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    st.set_page_config(
+        page_title="Agentic Tabular Pipeline", page_icon="🧪",
+        layout="wide", initial_sidebar_state="expanded",
+    )
+    st.markdown(_CSS, unsafe_allow_html=True)
     _init_state()
+    api = _client()
+
     st.title("Agentic Tabular Pipeline")
     st.caption("Sistema agentivo open source para dados tabulares — MAQ020")
 
-    experiment = _sidebar()
+    experiment = _sidebar(api)
 
     tab_setup, tab_profile, tab_actions, tab_results, tab_history = st.tabs(
-        ["⚙️ Experimento", "📊 Perfil & Qualidade", "🤖 Ações dos agentes",
+        ["⚙️ Experimento", "📊 Perfil & Qualidade", "🤖 Decisões dos agentes",
          "🏆 Resultados", "📜 Histórico agentivo"]
     )
     with tab_setup:
-        _tab_experiment(experiment)
+        _tab_experiment(api)
     with tab_profile:
-        _tab_profile()
+        _tab_profile(api, experiment)
     with tab_actions:
-        _tab_actions()
+        _tab_actions(api, experiment)
     with tab_results:
-        _tab_results(experiment)
+        _tab_results(api, experiment)
     with tab_history:
-        _tab_history(experiment)
+        _tab_history(api, experiment)
 
 
 if __name__ == "__main__":

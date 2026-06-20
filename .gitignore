@@ -16,6 +16,8 @@ data/raw/*
 data/processed/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
+# Exceção: base sintética pública de demonstração (ver data/README.md)
+!data/raw/credit.csv
 artifacts/
 
 # Ferramentas
