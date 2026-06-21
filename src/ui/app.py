@@ -118,6 +118,9 @@ def _sidebar(api: ApiClient) -> dict[str, Any] | None:
         if online:
             st.markdown(":green[● API online] "
                         f"<small>`{api.base_url}`</small>", unsafe_allow_html=True)
+            st.link_button("🛠️ Painel admin", f"{api.base_url}/admin", width="stretch",
+                           help="Visão administrativa de todos os experimentos, "
+                                "execuções e eventos (estilo Django Admin).")
         else:
             st.markdown(":red[● API offline] "
                         f"<small>`{api.base_url}`</small>", unsafe_allow_html=True)

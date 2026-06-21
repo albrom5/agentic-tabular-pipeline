@@ -142,3 +142,17 @@ def get_profile(
     if dataset is None:
         raise HTTPException(status_code=404, detail="Perfil ainda não disponível.")
     return dataset
+
+
+# ---------------------------------------------------------------------------
+# Painel de administração (estilo Django Admin) em /admin.
+#
+# Montado apenas quando há PostgreSQL configurado: o SQLAdmin exige a engine real
+# já na construção. Sem DATABASE_URL — como no ambiente de testes — o painel não é
+# montado e a suíte segue rodando com o store em memória.
+# ---------------------------------------------------------------------------
+if os.environ.get("DATABASE_URL"):
+    from src.api.admin import setup_admin
+    from src.db.models import get_engine
+
+    setup_admin(app, get_engine())

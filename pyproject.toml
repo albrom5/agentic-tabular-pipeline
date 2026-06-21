@@ -31,6 +31,10 @@ dependencies = [
     "uvicorn[standard]>=0.27",
     "streamlit>=1.30",
     "httpx>=0.27",  # cliente HTTP usado pela UI para chamar a API
+    # Painel de administração (estilo Django Admin) montado no app FastAPI.
+    # Puxa starlette, itsdangerous (cookie de sessão do login) e python-multipart
+    # (parsing do formulário de login).
+    "sqladmin>=0.18",
 ]
 
 [project.optional-dependencies]

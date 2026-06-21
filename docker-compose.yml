@@ -25,6 +25,10 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@db:5432/agentic}
       ARTIFACT_DIR: ${ARTIFACT_DIR:-artifacts/}
+      # Painel de administração em /admin (login simples por variáveis de ambiente)
+      ADMIN_USER: ${ADMIN_USER:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
+      ADMIN_SECRET_KEY: ${ADMIN_SECRET_KEY:-troque-este-segredo}
     ports:
       - "8000:8000"
     volumes:
