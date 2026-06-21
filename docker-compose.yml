@@ -5,10 +5,10 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-agentic}
-    # Publica na 5433 do host (5432 já é usada pelo PostgreSQL do host).
-    # Acesse via clientes externos (HeidiSQL etc.) por <ip-da-vm>:5433.
+    # Publica na 5434 do host (5432 e 5433 já são usadas pelos clusters
+    # PostgreSQL 12 e 14 do host). Acesse via HeidiSQL por <ip-da-vm>:5434.
     ports:
-      - "5433:5432"
+      - "5434:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       # As migrations são aplicadas automaticamente na primeira inicialização
