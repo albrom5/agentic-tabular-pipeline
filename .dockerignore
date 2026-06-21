@@ -1,0 +1,29 @@
+# Ambiente virtual local (NÃO deve ir para a imagem — contém torch CUDA, ~GB)
+.venv/
+venv/
+
+# Controle de versão e metadados
+.git/
+.gitignore
+
+# Caches e artefatos de build/teste
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Dados, notebooks e relatórios (não pertencem à imagem)
+data/
+notebooks/
+reports/
+
+# Segredos e ambiente local
+.env
+
+# Documentos e diversos
+*.pdf
+.vscode/
+.idea/
