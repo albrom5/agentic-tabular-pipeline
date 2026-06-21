@@ -14,7 +14,11 @@ RUN apt-get update \
 # Instala dependências primeiro para aproveitar o cache de camadas
 COPY pyproject.toml ./
 COPY README.md ./
-RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir .
+# Instala o torch na variante CPU-only (a VM não tem GPU): evita baixar o
+# stack CUDA da NVIDIA (~vários GB), reduzindo o tamanho da imagem.
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
+    && pip install --no-cache-dir .
 
 COPY . .
 
