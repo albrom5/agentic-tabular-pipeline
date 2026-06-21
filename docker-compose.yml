@@ -42,6 +42,8 @@ services:
     command: streamlit run src/ui/app.py --server.port 8501 --server.address 0.0.0.0
     environment:
       API_URL: ${API_URL:-http://api:8000}
+      # URL pública da API para links abertos no navegador (ex.: painel /admin)
+      API_PUBLIC_URL: ${API_PUBLIC_URL:-http://localhost:8000}
       DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@db:5432/agentic}
     ports:
       - "8501:8501"

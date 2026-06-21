@@ -18,6 +18,7 @@ Execução:
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +83,16 @@ def _client() -> ApiClient:
     return ApiClient()
 
 
+def _public_api_url() -> str:
+    """URL da API acessível pelo navegador (links que abrem no cliente).
+
+    No docker-compose, ``API_URL`` aponta para o hostname interno da rede
+    (``http://api:8000``), que o navegador do usuário não resolve. ``API_PUBLIC_URL``
+    fornece o endereço externo (padrão ``http://localhost:8000``).
+    """
+    return os.environ.get("API_PUBLIC_URL", "http://localhost:8000").rstrip("/")
+
+
 def _init_state() -> None:
     ss = st.session_state
     ss.setdefault("selected_experiment_id", None)
@@ -118,7 +129,9 @@ def _sidebar(api: ApiClient) -> dict[str, Any] | None:
         if online:
             st.markdown(":green[● API online] "
                         f"<small>`{api.base_url}`</small>", unsafe_allow_html=True)
-            st.link_button("🛠️ Painel admin", f"{api.base_url}/admin", width="stretch",
+            # O link abre no navegador do usuário, que não resolve o hostname
+            # interno da rede Docker (``api``). Usa a URL pública da API.
+            st.link_button("🛠️ Painel admin", f"{_public_api_url()}/admin", width="stretch",
                            help="Visão administrativa de todos os experimentos, "
                                 "execuções e eventos (estilo Django Admin).")
         else:
