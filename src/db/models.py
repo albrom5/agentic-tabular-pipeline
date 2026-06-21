@@ -41,6 +41,8 @@ class Experiment(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False, default="created")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    # Hash SHA-256 do token de acesso (capability token); ver src/api/security.py.
+    access_token_hash: Mapped[str | None] = mapped_column(Text)
 
 
 class Dataset(Base):

@@ -98,6 +98,8 @@ def _init_state() -> None:
     ss.setdefault("selected_experiment_id", None)
     ss.setdefault("preview_df", None)
     ss.setdefault("preview_source_uri", None)
+    # Tokens de acesso por experimento (capability tokens), escopo da sessão.
+    ss.setdefault("tokens", {})
 
 
 @st.cache_data(show_spinner=False)
@@ -141,28 +143,38 @@ def _sidebar(api: ApiClient) -> dict[str, Any] | None:
             return None
 
         st.divider()
-        try:
-            experiments = api.list_experiments()
-        except ApiError as exc:
-            st.error(str(exc))
-            return None
-
         if st.button("➕ Novo experimento", width="stretch"):
             st.session_state.selected_experiment_id = None
 
-        if not experiments:
-            st.info("Nenhum experimento ainda. Cadastre um na aba **Experimento**.")
+        # Acesso por token: sem lista aberta — o usuário informa o token recebido
+        # na criação para reabrir um experimento (confidencialidade).
+        with st.form("access_form"):
+            token_in = st.text_input(
+                "Token do experimento", type="password",
+                help="Informe o token gerado na criação para reabrir os dados "
+                     "daquele experimento.",
+            )
+            if st.form_submit_button("🔓 Acessar", width="stretch") and token_in.strip():
+                try:
+                    exp = api.resolve_experiment(token_in.strip())
+                except ApiError:
+                    st.error("Token inválido — nenhum experimento corresponde.")
+                else:
+                    st.session_state.tokens[exp["id"]] = token_in.strip()
+                    st.session_state.selected_experiment_id = exp["id"]
+                    st.toast("Experimento carregado.", icon="🔓")
+
+        eid = st.session_state.selected_experiment_id
+        if not eid:
+            st.info("Crie um experimento na aba **Experimento** ou informe um "
+                    "**token** acima para reabrir um existente.")
             return None
 
-        labels = {e["id"]: f"{e['name']} · {e['status']}" for e in experiments}
-        ids = list(labels.keys())
-        current = st.session_state.selected_experiment_id
-        index = ids.index(current) if current in ids else 0
-        chosen = st.selectbox(
-            "Experimento", ids, index=index, format_func=lambda i: labels[i]
-        )
-        st.session_state.selected_experiment_id = chosen
-        experiment = next(e for e in experiments if e["id"] == chosen)
+        try:
+            experiment = api.get_experiment(eid)
+        except ApiError as exc:
+            st.error(str(exc))
+            return None
 
         badge = _STATUS_BADGE.get(experiment["status"], "badge-draft")
         st.markdown(
@@ -295,14 +307,22 @@ def _submit_experiment(api: ApiClient, **f: Any) -> None:
             primary_metric=f["primary_metric"], config=config,
         )
         eid = created["experiment_id"]
+        token = created.get("access_token", "")
         api.run_experiment(eid)
     except ApiError as exc:
         st.error(str(exc))
         return
+    st.session_state.tokens[eid] = token
     st.session_state.selected_experiment_id = eid
     st.success(f"Experimento criado (`{eid[:8]}…`) e pipeline em execução. "
                "Acompanhe o status na barra lateral e veja **Resultados** ao concluir.")
-    st.balloons()
+    if token:
+        st.warning(
+            "🔑 **Guarde o token de acesso deste experimento — ele é exibido "
+            "apenas uma vez.** Sem ele, não será possível reabrir estes dados.",
+        )
+        st.code(token, language=None)
+    st.toast("Experimento criado e execução disparada.", icon="🚀")
 
 
 def _build_config(*, source_uri: str, name: str, task_type: str, target: str | None,
@@ -518,7 +538,9 @@ def _tab_results(api: ApiClient, experiment: dict[str, Any] | None) -> None:
     runs = _safe_runs(api, experiment["id"])
     run = runs[-1] if runs else None
     metrics = (run or {}).get("metrics_json") or {}
-    ranking = summary.get("ranking") or (api.ranking(run["id"]) if run else [])
+    ranking = summary.get("ranking") or (
+        api.ranking(run["id"], experiment["id"]) if run else []
+    )
 
     if not ranking:
         st.info("Ranking ainda não disponível.")
@@ -661,6 +683,10 @@ def main() -> None:
     st.markdown(_CSS, unsafe_allow_html=True)
     _init_state()
     api = _client()
+    # O cliente é um singleton (cache_resource); ressincroniza os tokens desta
+    # sessão para autorizar as chamadas mesmo após reinício do processo.
+    for _eid, _tok in st.session_state.tokens.items():
+        api.register_token(_eid, _tok)
 
     st.title("Agentic Tabular Pipeline")
     st.caption("Sistema agentivo open source para dados tabulares — MAQ020")

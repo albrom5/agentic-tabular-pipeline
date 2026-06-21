@@ -15,6 +15,7 @@ from typing import Any
 
 from sqlalchemy import select
 
+from src.api.security import generate_token, hash_token, verify_token
 from src.db.models import (
     AgentEvent,
     Dataset,
@@ -47,20 +48,77 @@ class ExperimentStore:
         target_column: str | None,
         primary_metric: str,
         config: dict[str, Any],
-    ) -> str:
+    ) -> dict[str, str]:
+        """Cadastra o experimento e devolve seu id e o token de acesso.
+
+        O token (em claro) só existe aqui e na resposta ao usuário: no banco
+        guardamos apenas o hash (RNF07/confidencialidade). Ver
+        :mod:`src.api.security`.
+        """
+        token = generate_token()
         experiment_id = self._recorder.create_experiment(
             name=name,
             task_type=task_type,
             target_column=target_column,
             primary_metric=primary_metric,
             config=config,
+            access_token_hash=hash_token(token),
         )
         # create_experiment marca como 'running'; aqui o experimento apenas
         # nasce cadastrado, então voltamos o status para 'created'.
         self._recorder.set_experiment_status(
             experiment_id=experiment_id, status="created"
         )
-        return str(experiment_id)
+        return {"experiment_id": str(experiment_id), "access_token": token}
+
+    def verify_access(self, experiment_id: str, token: str | None) -> bool:
+        """True se ``token`` corresponde ao experimento (e ele existe)."""
+        try:
+            eid = uuid.UUID(experiment_id)
+        except (ValueError, AttributeError):
+            return False
+        with self._sf() as session:
+            exp = session.get(Experiment, eid)
+            if exp is None:
+                return False
+            return verify_token(token, exp.access_token_hash)
+
+    def resolve_by_token(self, token: str | None) -> dict[str, Any] | None:
+        """Localiza um experimento pelo token, sem enumerar os demais.
+
+        Substitui a antiga listagem aberta: o usuário informa o token e recupera
+        apenas o experimento correspondente.
+        """
+        if not token:
+            return None
+        with self._sf() as session:
+            exp = session.execute(
+                select(Experiment).where(
+                    Experiment.access_token_hash == hash_token(token)
+                )
+            ).scalar_one_or_none()
+            if exp is None:
+                return None
+            return {
+                "id": str(exp.id),
+                "name": exp.name,
+                "task_type": exp.task_type,
+                "target_column": exp.target_column,
+                "primary_metric": exp.primary_metric,
+                "status": exp.status,
+                "created_at": _iso(exp.created_at),
+                "config": exp.config,
+            }
+
+    def experiment_id_for_run(self, run_id: str) -> str | None:
+        """Id do experimento dono de um run (para autorizar o ranking)."""
+        try:
+            rid = uuid.UUID(run_id)
+        except (ValueError, AttributeError):
+            return None
+        with self._sf() as session:
+            run = session.get(PipelineRun, rid)
+            return str(run.experiment_id) if run is not None else None
 
     def execute(self, experiment_id: str) -> None:
         """Executa o pipeline de ponta a ponta para um experimento cadastrado.
@@ -84,25 +142,8 @@ class ExperimentStore:
             raise
 
     # -- leitura ---------------------------------------------------------------
-
-    def list_experiments(self) -> list[dict[str, Any]]:
-        """Lista os experimentos cadastrados (mais recentes primeiro)."""
-        with self._sf() as session:
-            rows = session.execute(
-                select(Experiment).order_by(Experiment.created_at.desc())
-            ).scalars().all()
-            return [
-                {
-                    "id": str(exp.id),
-                    "name": exp.name,
-                    "task_type": exp.task_type,
-                    "target_column": exp.target_column,
-                    "primary_metric": exp.primary_metric,
-                    "status": exp.status,
-                    "created_at": _iso(exp.created_at),
-                }
-                for exp in rows
-            ]
+    # Não há listagem aberta de experimentos por confidencialidade: o acesso se
+    # dá por token (ver ``resolve_by_token``), não por enumeração.
 
     def get_experiment(self, experiment_id: str) -> dict[str, Any] | None:
         try:

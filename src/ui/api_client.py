@@ -29,6 +29,20 @@ class ApiClient:
         self.base_url = (base_url or os.environ.get("API_URL", "http://localhost:8000")).rstrip("/")
         # ``client`` injetável permite testar via ASGITransport sem servidor real.
         self._client = client or httpx.Client(base_url=self.base_url, timeout=timeout)
+        # Tokens de acesso por experimento (capability tokens), enviados no
+        # cabeçalho ``X-Experiment-Token`` das chamadas àquele experimento.
+        self._tokens: dict[str, str] = {}
+
+    # -- tokens de acesso ------------------------------------------------------
+
+    def register_token(self, experiment_id: str, token: str) -> None:
+        """Memoriza o token de um experimento para as próximas chamadas."""
+        if experiment_id and token:
+            self._tokens[experiment_id] = token
+
+    def _auth_headers(self, experiment_id: str) -> dict[str, str]:
+        token = self._tokens.get(experiment_id)
+        return {"X-Experiment-Token": token} if token else {}
 
     # -- infraestrutura --------------------------------------------------------
 
@@ -52,11 +66,17 @@ class ApiClient:
 
     # -- experimentos ----------------------------------------------------------
 
-    def list_experiments(self) -> list[dict[str, Any]]:
-        return self._request("GET", "/experiments") or []
+    def resolve_experiment(self, token: str) -> dict[str, Any]:
+        """Recupera um experimento pelo token e memoriza o token para reuso."""
+        exp = self._request("POST", "/experiments/resolve", json={"token": token})
+        self.register_token(exp["id"], token)
+        return exp
 
     def get_experiment(self, experiment_id: str) -> dict[str, Any]:
-        return self._request("GET", f"/experiments/{experiment_id}")
+        return self._request(
+            "GET", f"/experiments/{experiment_id}",
+            headers=self._auth_headers(experiment_id),
+        )
 
     def create_experiment(
         self,
@@ -74,31 +94,52 @@ class ApiClient:
             "primary_metric": primary_metric,
             "config": config,
         }
-        return self._request("POST", "/experiments", json=payload)
+        created = self._request("POST", "/experiments", json=payload)
+        # Guarda o token recém-gerado para autorizar as chamadas seguintes.
+        self.register_token(created["experiment_id"], created.get("access_token", ""))
+        return created
 
     def run_experiment(self, experiment_id: str) -> dict[str, Any]:
-        return self._request("POST", f"/experiments/{experiment_id}/run")
+        return self._request(
+            "POST", f"/experiments/{experiment_id}/run",
+            headers=self._auth_headers(experiment_id),
+        )
 
     # -- consultas -------------------------------------------------------------
 
     def list_events(self, experiment_id: str) -> list[dict[str, Any]]:
-        return self._request("GET", f"/experiments/{experiment_id}/events") or []
+        return self._request(
+            "GET", f"/experiments/{experiment_id}/events",
+            headers=self._auth_headers(experiment_id),
+        ) or []
 
     def list_runs(self, experiment_id: str) -> list[dict[str, Any]]:
-        return self._request("GET", f"/experiments/{experiment_id}/runs") or []
+        return self._request(
+            "GET", f"/experiments/{experiment_id}/runs",
+            headers=self._auth_headers(experiment_id),
+        ) or []
 
-    def ranking(self, run_id: str) -> list[dict[str, Any]]:
-        return self._request("GET", f"/runs/{run_id}/ranking") or []
+    def ranking(self, run_id: str, experiment_id: str) -> list[dict[str, Any]]:
+        return self._request(
+            "GET", f"/runs/{run_id}/ranking",
+            headers=self._auth_headers(experiment_id),
+        ) or []
 
     def get_profile(self, experiment_id: str) -> dict[str, Any] | None:
         try:
-            return self._request("GET", f"/experiments/{experiment_id}/profile")
+            return self._request(
+                "GET", f"/experiments/{experiment_id}/profile",
+                headers=self._auth_headers(experiment_id),
+            )
         except ApiError:
             return None
 
     def get_report(self, experiment_id: str) -> dict[str, Any] | None:
         try:
-            return self._request("GET", f"/experiments/{experiment_id}/report")
+            return self._request(
+                "GET", f"/experiments/{experiment_id}/report",
+                headers=self._auth_headers(experiment_id),
+            )
         except ApiError:
             return None
 

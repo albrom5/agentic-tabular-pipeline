@@ -43,26 +43,41 @@ class RunRecorder:
         primary_metric: str,
         config: dict[str, Any],
         experiment_id: uuid.UUID | None = None,
+        access_token_hash: str | None = None,
     ) -> uuid.UUID:
         """Cria (ou atualiza) o experimento e o marca como ``running``.
 
         Quando ``experiment_id`` é informado — caso da API, que cadastra o
         experimento antes de disparar a execução — a linha existente é
-        atualizada via ``merge`` em vez de criar uma duplicata.
+        atualizada em vez de criar uma duplicata. O ``access_token_hash`` só é
+        gravado na criação inicial: numa reexecução ele chega ``None`` e o hash
+        já persistido é preservado (não sobrescrevemos a chave de acesso).
         """
         experiment_id = experiment_id or uuid.uuid4()
         with self._sf() as session:
-            session.merge(
-                Experiment(
-                    id=experiment_id,
-                    name=name,
-                    task_type=task_type,
-                    target_column=target_column,
-                    primary_metric=primary_metric,
-                    status="running",
-                    config=config,
+            exp = session.get(Experiment, experiment_id)
+            if exp is None:
+                session.add(
+                    Experiment(
+                        id=experiment_id,
+                        name=name,
+                        task_type=task_type,
+                        target_column=target_column,
+                        primary_metric=primary_metric,
+                        status="running",
+                        config=config,
+                        access_token_hash=access_token_hash,
+                    )
                 )
-            )
+            else:
+                exp.name = name
+                exp.task_type = task_type
+                exp.target_column = target_column
+                exp.primary_metric = primary_metric
+                exp.status = "running"
+                exp.config = config
+                if access_token_hash is not None:
+                    exp.access_token_hash = access_token_hash
             session.commit()
         return experiment_id
 

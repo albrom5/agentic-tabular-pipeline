@@ -39,8 +39,17 @@ class TestApiClient:
             primary_metric="macro_f1", config={"experiment": {}},
         )
         eid = created["experiment_id"]
+        # O token devolvido na criação autoriza as chamadas seguintes.
+        assert created["access_token"]
         assert api.get_experiment(eid)["status"] == "created"
-        assert any(e["id"] == eid for e in api.list_experiments())
+
+    def test_resolve_experiment_by_token(self, api):
+        created = api.create_experiment(
+            name="demo", task_type="classification", target_column="default",
+            primary_metric="macro_f1", config={"experiment": {}},
+        )
+        resolved = api.resolve_experiment(created["access_token"])
+        assert resolved["id"] == created["experiment_id"]
 
     def test_run(self, api):
         eid = api.create_experiment(
@@ -73,5 +82,5 @@ class TestApiClient:
         offline = ApiClient(base_url="http://127.0.0.1:1", client=client)
         assert offline.health() is False
         with pytest.raises(ApiError):
-            offline.list_experiments()
+            offline.resolve_experiment("qualquer-token")
         client.close()

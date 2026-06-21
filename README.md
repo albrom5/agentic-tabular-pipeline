@@ -91,6 +91,16 @@ API_URL=http://localhost:8000 streamlit run src/ui/app.py   # UI em http://local
 O notebook `notebooks/demo_end_to_end.ipynb` demonstra o fluxo completo e as
 consultas de auditoria da seção 23 (roda em memória sem `DATABASE_URL`).
 
+### Confidencialidade por token
+
+Cada experimento recebe, na criação, um **token de acesso** (exibido uma única
+vez). A API não oferece listagem aberta: para reabrir um experimento informa-se o
+token (`POST /experiments/resolve`), enviado depois no cabeçalho
+`X-Experiment-Token` das chamadas àquele experimento. No banco guarda-se apenas o
+hash SHA-256 do token (ver `src/api/security.py`). O painel `/admin` continua sob
+login (`ADMIN_USER`/`ADMIN_PASSWORD`) para o operador. Experimentos criados antes
+desta versão ficam sem token e só são acessíveis via `/admin`.
+
 ## Stack open source
 
 Python · pandas · scikit-learn · PyTorch · Optuna · FastAPI · Streamlit · PostgreSQL/JSONB · Docker.

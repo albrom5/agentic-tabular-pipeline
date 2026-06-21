@@ -28,21 +28,34 @@ class FakeStore:
         self.reports: dict[str, dict] = {}
         self.datasets: dict[str, dict] = {}
         self.executed: list[str] = []
-
-    def list_experiments(self):
-        return list(self.experiments.values())
+        self.tokens: dict[str, str] = {}
+        self.run_to_experiment: dict[str, str] = {}
 
     def create_experiment(self, *, name, task_type, target_column, primary_metric, config):
         eid = str(uuid.uuid4())
+        token = f"token-{eid}"
         self.experiments[eid] = {
             "id": eid, "name": name, "task_type": task_type,
             "target_column": target_column, "primary_metric": primary_metric,
             "status": "created", "config": config,
         }
-        return eid
+        self.tokens[eid] = token
+        return {"experiment_id": eid, "access_token": token}
 
     def get_experiment(self, experiment_id):
         return self.experiments.get(experiment_id)
+
+    def verify_access(self, experiment_id, token):
+        return token is not None and self.tokens.get(experiment_id) == token
+
+    def resolve_by_token(self, token):
+        for eid, tok in self.tokens.items():
+            if tok == token:
+                return self.experiments[eid]
+        return None
+
+    def experiment_id_for_run(self, run_id):
+        return self.run_to_experiment.get(run_id)
 
     def execute(self, experiment_id):
         self.executed.append(experiment_id)
@@ -86,6 +99,12 @@ _PAYLOAD = {
 }
 
 
+def _create(client) -> tuple[str, dict[str, str]]:
+    """Cria um experimento e devolve (id, cabeçalho de token de acesso)."""
+    body = client.post("/experiments", json=_PAYLOAD).json()
+    return body["experiment_id"], {"X-Experiment-Token": body["access_token"]}
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -98,12 +117,13 @@ class TestHealth:
 
 
 class TestCreateExperiment:
-    def test_creates_and_returns_id(self, client, store):
+    def test_creates_and_returns_id_and_token(self, client, store):
         resp = client.post("/experiments", json=_PAYLOAD)
         assert resp.status_code == 201
         body = resp.json()
         assert body["status"] == "created"
         assert body["experiment_id"] in store.experiments
+        assert body["access_token"]  # token devolvido uma única vez
 
     def test_validation_error_when_missing_field(self, client, store):
         bad = {k: v for k, v in _PAYLOAD.items() if k != "primary_metric"}
@@ -111,14 +131,39 @@ class TestCreateExperiment:
         assert resp.status_code == 422
 
 
+class TestAccessControl:
+    def test_get_without_token_is_401(self, client, store):
+        eid, _ = _create(client)
+        assert client.get(f"/experiments/{eid}").status_code == 401
+
+    def test_get_with_wrong_token_is_401(self, client, store):
+        eid, _ = _create(client)
+        resp = client.get(f"/experiments/{eid}", headers={"X-Experiment-Token": "errado"})
+        assert resp.status_code == 401
+
+    def test_unknown_experiment_is_401_not_404(self, client, store):
+        # Sem distinguir inexistente de não-autorizado: evita enumeração.
+        resp = client.get(f"/experiments/{uuid.uuid4()}", headers={"X-Experiment-Token": "x"})
+        assert resp.status_code == 401
+
+    def test_resolve_by_token_returns_experiment(self, client, store):
+        body = client.post("/experiments", json=_PAYLOAD).json()
+        resp = client.post("/experiments/resolve", json={"token": body["access_token"]})
+        assert resp.status_code == 200
+        assert resp.json()["id"] == body["experiment_id"]
+
+    def test_resolve_with_bad_token_is_404(self, client, store):
+        assert client.post("/experiments/resolve", json={"token": "nada"}).status_code == 404
+
+
 class TestRunExperiment:
-    def test_run_unknown_returns_404(self, client, store):
-        resp = client.post(f"/experiments/{uuid.uuid4()}/run")
-        assert resp.status_code == 404
+    def test_run_without_token_is_401(self, client, store):
+        eid, _ = _create(client)
+        assert client.post(f"/experiments/{eid}/run").status_code == 401
 
     def test_run_known_schedules_execution(self, client, store):
-        eid = client.post("/experiments", json=_PAYLOAD).json()["experiment_id"]
-        resp = client.post(f"/experiments/{eid}/run")
+        eid, headers = _create(client)
+        resp = client.post(f"/experiments/{eid}/run", headers=headers)
         assert resp.status_code == 202
         assert resp.json()["status"] == "running"
         # BackgroundTasks rodam após a resposta no TestClient.
@@ -127,65 +172,56 @@ class TestRunExperiment:
 
 
 class TestEvents:
-    def test_events_unknown_returns_404(self, client, store):
-        resp = client.get(f"/experiments/{uuid.uuid4()}/events")
-        assert resp.status_code == 404
+    def test_events_without_token_is_401(self, client, store):
+        eid, _ = _create(client)
+        assert client.get(f"/experiments/{eid}/events").status_code == 401
 
     def test_events_returns_history(self, client, store):
-        eid = client.post("/experiments", json=_PAYLOAD).json()["experiment_id"]
+        eid, headers = _create(client)
         store.events[eid] = [
             {"agent_name": "Agente de Limpeza", "event_type": "cleaning_decision"}
         ]
-        resp = client.get(f"/experiments/{eid}/events")
+        resp = client.get(f"/experiments/{eid}/events", headers=headers)
         assert resp.status_code == 200
         assert resp.json()[0]["agent_name"] == "Agente de Limpeza"
 
 
-class TestListAndGet:
-    def test_list_experiments(self, client, store):
-        client.post("/experiments", json=_PAYLOAD)
-        resp = client.get("/experiments")
-        assert resp.status_code == 200
-        assert len(resp.json()) == 1
-        assert resp.json()[0]["name"] == "demo"
-
+class TestGet:
     def test_get_experiment_detail(self, client, store):
-        eid = client.post("/experiments", json=_PAYLOAD).json()["experiment_id"]
-        resp = client.get(f"/experiments/{eid}")
+        eid, headers = _create(client)
+        resp = client.get(f"/experiments/{eid}", headers=headers)
         assert resp.status_code == 200
         assert resp.json()["status"] == "created"
 
-    def test_get_experiment_unknown_404(self, client, store):
-        assert client.get(f"/experiments/{uuid.uuid4()}").status_code == 404
-
 
 class TestReportAndProfile:
-    def test_report_unknown_404(self, client, store):
-        assert client.get(f"/experiments/{uuid.uuid4()}/report").status_code == 404
+    def test_report_without_token_is_401(self, client, store):
+        eid, _ = _create(client)
+        assert client.get(f"/experiments/{eid}/report").status_code == 401
 
     def test_report_returns_markdown(self, client, store):
-        eid = client.post("/experiments", json=_PAYLOAD).json()["experiment_id"]
+        eid, headers = _create(client)
         store.reports[eid] = {"content": "# Relatório", "summary_json": {"best_model": "rf"}}
-        resp = client.get(f"/experiments/{eid}/report")
+        resp = client.get(f"/experiments/{eid}/report", headers=headers)
         assert resp.status_code == 200
         assert resp.json()["content"].startswith("# Relatório")
 
-    def test_profile_unknown_404(self, client, store):
-        assert client.get(f"/experiments/{uuid.uuid4()}/profile").status_code == 404
-
     def test_profile_returns_dataset(self, client, store):
-        eid = client.post("/experiments", json=_PAYLOAD).json()["experiment_id"]
+        eid, headers = _create(client)
         store.datasets[eid] = {"name": "credit", "profile_json": {"n_rows": 1000}}
-        resp = client.get(f"/experiments/{eid}/profile")
+        resp = client.get(f"/experiments/{eid}/profile", headers=headers)
         assert resp.status_code == 200
         assert resp.json()["profile_json"]["n_rows"] == 1000
 
 
 class TestRanking:
-    def test_ranking_returns_store_payload(self, client, store):
+    def test_ranking_requires_token(self, client, store):
+        eid, headers = _create(client)
         run_id = str(uuid.uuid4())
+        store.run_to_experiment[run_id] = eid
         store.rankings[run_id] = [{"model_name": "rf", "mean": 0.9}]
-        resp = client.get(f"/runs/{run_id}/ranking")
+        assert client.get(f"/runs/{run_id}/ranking").status_code == 401
+        resp = client.get(f"/runs/{run_id}/ranking", headers=headers)
         assert resp.status_code == 200
         assert resp.json()[0]["model_name"] == "rf"
 
